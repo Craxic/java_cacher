@@ -37,6 +37,8 @@ from plyj.parser import Parser
 import abc
 import re
 
+INTEGER_TYPES = ["int", "long", "short"]
+
 
 def find_function_declaration(name, class_decl):
     for i, decl in enumerate(class_decl.body):
@@ -78,7 +80,7 @@ class CacheInstruction(Instruction):
 
     def run(self, fully_qualified_name, class_decl):
         if not name_matches(self.class_name, fully_qualified_name):
-            return
+            return False
 
         func_index, func_decl = find_function_declaration(self.func_name,
                                                           class_decl)
@@ -140,6 +142,8 @@ class CacheInstruction(Instruction):
             return_type=func_decl.return_type, body=func_decl_cached_body)
         class_decl.body.insert(func_index, func_decl_cached)
 
+        return True
+
 
 class CacheArrayNoNullsInstruction(Instruction):
     def __init__(self, fields):
@@ -154,7 +158,7 @@ class CacheArrayNoNullsInstruction(Instruction):
 
     def run(self, fully_qualified_name, class_decl):
         if not name_matches(self.class_name, fully_qualified_name):
-            return
+            return False
 
         count_index, count_decl = find_function_declaration(
             self.count_func_name, class_decl)
@@ -172,8 +176,8 @@ class CacheArrayNoNullsInstruction(Instruction):
         if len(get_decl.type_parameters) != 0:
             raise ValueError("Type parameters not supported")
 
-        if count_decl.return_type.name.value not in ["int", "long"]:
-            raise ValueError("Count must return int or long.")
+        if count_decl.return_type.name.value not in INTEGER_TYPES:
+            raise ValueError("Count must return an integer type.")
 
         if len(count_decl.parameters) != 0:
             raise ValueError("Parameters in count function are not supported")
@@ -181,11 +185,11 @@ class CacheArrayNoNullsInstruction(Instruction):
         if len(get_decl.parameters) != 1:
             raise ValueError("Exactly 1 parameter allowed in get function.")
 
-        if get_decl.parameters[0].type.name.value not in ["int", "long"]:
-            raise ValueError("Get parameter muse be int or long.")
+        if get_decl.parameters[0].type.name.value not in INTEGER_TYPES:
+            raise ValueError("Get parameter must be an integer type.")
 
-        if get_decl.parameters[0].type.name.value not in ["int", "long"]:
-            raise ValueError("Get parameter muse be int or long.")
+        if get_decl.parameters[0].type.name.value not in INTEGER_TYPES:
+            raise ValueError("Get parameter must be an integer type.")
         
         if is_static(count_decl.modifiers) != is_static(get_decl.modifiers):
             raise ValueError("Both functions must be static or non-static")
@@ -262,6 +266,8 @@ class CacheArrayNoNullsInstruction(Instruction):
             body=get_decl_cached_body)
         class_decl.body.insert(get_index, get_decl_cached)
 
+        return True
+
 
 class InstructionFile:
     @staticmethod
@@ -283,14 +289,17 @@ class InstructionFile:
 
     def rewrite_class_decl(self, fully_qualified_name, class_decl):
         # First, let's recurse into all child class definitions
+        applied = False
         for declaration in class_decl.body:
             if isinstance(declaration, ClassDeclaration):
                 name = fully_qualified_name + "." + declaration.name.value
-                self.rewrite_class_decl(name, declaration)
+                applied |= self.rewrite_class_decl(name, declaration)
 
         # Now we run all our instructions on the class declaration
         for instruction in self.instructions:
-            instruction.run(fully_qualified_name, class_decl)
+            applied |= instruction.run(fully_qualified_name, class_decl)
+
+        return applied
 
 
 def cache_file(input_filename, instruction_file, output_filename,
@@ -311,10 +320,12 @@ def cache_file(input_filename, instruction_file, output_filename,
     package = ""
     if tree.package_declaration is not None:
         package = tree.package_declaration.name.value + "."
+
+    applied = False
     for type_decl in tree.type_declarations:
         if isinstance(type_decl, ClassDeclaration):
             name = package + type_decl.name.value
-            instruction_file.rewrite_class_decl(name, type_decl)
+            applied |= instruction_file.rewrite_class_decl(name, type_decl)
 
     if tree_callback is not None:
         tree_callback(tree, input_filename, output_filename)
@@ -322,6 +333,8 @@ def cache_file(input_filename, instruction_file, output_filename,
     # Write tree to output.
     with open(output_filename, "w") as f:
         f.write(tree.serialize())
+
+    return applied
 
 
 def main(input_filename, instruction_file_filename, output_filename,
@@ -348,8 +361,16 @@ def main(input_filename, instruction_file_filename, output_filename,
                 out_path = os.path.join(output_filename, file_loc)
                 out_path = os.path.abspath(out_path)
                 in_path = os.path.join(root, file_)
-                print("{} -> {}".format(in_path, out_path))
-                cache_file(in_path, instruction_file, out_path, tree_callback)
+
+                try:
+                    cached = cache_file(in_path, instruction_file,
+                                        out_path, tree_callback)
+                except:
+                    print("Choked on {}. Raising.".format(in_path))
+                    raise
+
+                print("[{}] {} -> {}".format("CACHED" if cached else "      ",
+                                             in_path, out_path))
 
 
 if __name__ == "__main__":
