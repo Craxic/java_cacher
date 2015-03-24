@@ -272,6 +272,8 @@ class CacheArrayNoNullsInstruction(Instruction):
 class InstructionFile:
     @staticmethod
     def _make_instruction(x):
+        if x.startswith("//"):
+            return None
         fields = x.split(" ")
         if len(fields) == 0:
             return None
