@@ -32,6 +32,7 @@ from plyj.model.method import MethodDeclaration
 from plyj.model.modifier import BasicModifier
 from plyj.model.name import Name
 from plyj.model.statement import IfThenElse, Return, Block, ExpressionStatement
+from plyj.model.type import Type
 from plyj.model.variable import VariableDeclarator, Variable
 from plyj.parser import Parser
 import abc
@@ -41,10 +42,24 @@ INTEGER_TYPES = ["int", "long", "short"]
 
 
 def find_function_declaration(name, class_decl):
-    for i, decl in enumerate(class_decl.body):
-        if isinstance(decl, MethodDeclaration) and decl.name.value == name:
-            return i, decl
-    return None, None
+    for i, decl in function_declarations(name, class_decl):
+        return i, decl
+
+
+def function_declarations(name, class_decl):
+    return_list = []
+    if name == "!public_non_primitive_returns!":
+        for i, decl in enumerate(class_decl.body):
+            if (isinstance(decl, MethodDeclaration)
+               and not Type.is_primitive(decl.return_type.name.value)
+               and len(decl.parameters) == 0
+               and "public" in [x.value for x in decl.modifiers]):
+                return_list.append((i, decl))
+    else:
+        for i, decl in enumerate(class_decl.body):
+            if isinstance(decl, MethodDeclaration) and decl.name.value == name:
+                return_list.append((i, decl))
+    return return_list
 
 
 class Instruction(object):
@@ -82,65 +97,66 @@ class CacheInstruction(Instruction):
         if not name_matches(self.class_name, fully_qualified_name):
             return False
 
-        func_index, func_decl = find_function_declaration(self.func_name,
-                                                          class_decl)
+        for func_index, func_decl in function_declarations(self.func_name,
+                                                           class_decl):
+            if func_decl is None:
+                raise ValueError("Could not locate function " + 
+                                 self.func_name + " in class " + 
+                                 fully_qualified_name)
 
-        if func_decl is None:
-            raise ValueError("Could not locate function " + self.func_name +
-                             " in class " + fully_qualified_name)
+            if len(func_decl.type_parameters) != 0:
+                raise ValueError("Type parameters not supported")
 
-        if len(func_decl.type_parameters) != 0:
-            raise ValueError("Type parameters not supported")
+            if len(func_decl.parameters) != 0:
+                raise ValueError("Parameters are not supported")
+              
+            static_modifiers = []  
+            if is_static(func_decl.modifiers):
+                static_modifiers = ["static"]
 
-        if len(func_decl.parameters) != 0:
-            raise ValueError("Parameters are not supported")
-          
-        static_modifiers = []  
-        if is_static(func_decl.modifiers):
-            static_modifiers = ["static"]
+            is_cached_name = "is" + func_decl.name.value + "Cached"
+            is_cached_decl = FieldDeclaration(
+                "boolean",
+                VariableDeclarator(Variable(is_cached_name), 
+                                   Literal("false")),
+                modifiers=["private"] + static_modifiers)
 
-        is_cached_name = "is" + func_decl.name.value + "Cached"
-        is_cached_decl = FieldDeclaration(
-            "boolean",
-            VariableDeclarator(Variable(is_cached_name), Literal("false")),
-            modifiers=["private"] + static_modifiers)
+            cached_name = func_decl.name.value + "Cached"
+            cached_decl = FieldDeclaration(
+                func_decl.return_type,
+                VariableDeclarator(Variable(cached_name)),
+                modifiers=["private"] + static_modifiers)
 
-        cached_name = func_decl.name.value + "Cached"
-        cached_decl = FieldDeclaration(
-            func_decl.return_type,
-            VariableDeclarator(Variable(cached_name)),
-            modifiers=["private"] + static_modifiers)
+            class_decl.body.insert(func_index, cached_decl)
+            class_decl.body.insert(func_index, is_cached_decl)
 
-        class_decl.body.insert(func_index, cached_decl)
-        class_decl.body.insert(func_index, is_cached_decl)
+            func_decl_name = func_decl.name
+            func_decl.name = Name(func_decl.name.value + "Uncached")
+            BasicModifier.set_visibility(func_decl.modifiers, "private")
 
-        func_decl_name = func_decl.name
-        func_decl.name = Name(func_decl.name.value + "Uncached")
-        BasicModifier.set_visibility(func_decl.modifiers, "private")
-
-        # create func_decl again, this time wrapped in a cache.
-        func_decl_cached_body = [
-            IfThenElse(
-                Unary("!", Name(is_cached_name)),
-                Block([
-                    ExpressionStatement(Assignment(
-                        "=",
-                        Name(is_cached_name),
-                        Literal("true")
-                    )),
-                    ExpressionStatement(Assignment(
-                        "=",
-                        Name(cached_name),
-                        MethodInvocation(func_decl.name)
-                    ))
-                ])
-            ),
-            Return(Name(cached_name))
-        ]
-        func_decl_cached = MethodDeclaration(
-            func_decl_name, ["public"] + static_modifiers,
-            return_type=func_decl.return_type, body=func_decl_cached_body)
-        class_decl.body.insert(func_index, func_decl_cached)
+            # create func_decl again, this time wrapped in a cache.
+            func_decl_cached_body = [
+                IfThenElse(
+                    Unary("!", Name(is_cached_name)),
+                    Block([
+                        ExpressionStatement(Assignment(
+                            "=",
+                            Name(is_cached_name),
+                            Literal("true")
+                        )),
+                        ExpressionStatement(Assignment(
+                            "=",
+                            Name(cached_name),
+                            MethodInvocation(func_decl.name)
+                        ))
+                    ])
+                ),
+                Return(Name(cached_name))
+            ]
+            func_decl_cached = MethodDeclaration(
+                func_decl_name, ["public"] + static_modifiers,
+                return_type=func_decl.return_type, body=func_decl_cached_body)
+            class_decl.body.insert(func_index, func_decl_cached)
 
         return True
 
@@ -275,12 +291,14 @@ class InstructionFile:
         if x.startswith("//"):
             return None
         fields = x.split(" ")
-        if len(fields) == 0:
+        if len(fields) == 0 or (fields[0] == "" and len(fields) == 1):
             return None
         if fields[0] == "cache":
             return CacheInstruction(fields[1:])
         elif fields[0] == "cache_array_no_nulls":
             return CacheArrayNoNullsInstruction(fields[1:])
+        else:
+            raise ValueError("Unknown instruction type")
 
     def __init__(self, data):
         self.instructions = []
