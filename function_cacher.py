@@ -44,6 +44,7 @@ INTEGER_TYPES = ["int", "long", "short"]
 def find_function_declaration(name, class_decl):
     for i, decl in function_declarations(name, class_decl):
         return i, decl
+    return None, None
 
 
 def function_declarations(name, class_decl):
