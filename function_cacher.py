@@ -95,9 +95,9 @@ class CacheInstruction(Instruction):
         self.func_name = fields[1]
 
     def run(self, fully_qualified_name, class_decl):
+        cached = []
         if not name_matches(self.class_name, fully_qualified_name):
-            return False
-
+            return cached
         for func_index, func_decl in function_declarations(self.func_name,
                                                            class_decl):
             if func_decl is None:
@@ -110,8 +110,10 @@ class CacheInstruction(Instruction):
 
             if len(func_decl.parameters) != 0:
                 raise ValueError("Parameters are not supported")
-              
-            static_modifiers = []  
+
+            cached.append(fully_qualified_name + "." + func_decl.name.value)
+
+            static_modifiers = []
             if is_static(func_decl.modifiers):
                 static_modifiers = ["static"]
 
@@ -158,8 +160,7 @@ class CacheInstruction(Instruction):
                 func_decl_name, ["public"] + static_modifiers,
                 return_type=func_decl.return_type, body=func_decl_cached_body)
             class_decl.body.insert(func_index, func_decl_cached)
-
-        return True
+        return cached
 
 
 class CacheArrayNoNullsInstruction(Instruction):
@@ -175,7 +176,7 @@ class CacheArrayNoNullsInstruction(Instruction):
 
     def run(self, fully_qualified_name, class_decl):
         if not name_matches(self.class_name, fully_qualified_name):
-            return False
+            return []
 
         count_index, count_decl = find_function_declaration(
             self.count_func_name, class_decl)
@@ -283,7 +284,8 @@ class CacheArrayNoNullsInstruction(Instruction):
             body=get_decl_cached_body)
         class_decl.body.insert(get_index, get_decl_cached)
 
-        return True
+        return [fully_qualified_name + "." + self.count_func_name,
+                fully_qualified_name + "." + self.get_func_name]
 
 
 class InstructionFile:
@@ -310,17 +312,17 @@ class InstructionFile:
 
     def rewrite_class_decl(self, fully_qualified_name, class_decl):
         # First, let's recurse into all child class definitions
-        applied = False
+        cached = []
         for declaration in class_decl.body:
             if isinstance(declaration, ClassDeclaration):
                 name = fully_qualified_name + "." + declaration.name.value
-                applied |= self.rewrite_class_decl(name, declaration)
+                cached += self.rewrite_class_decl(name, declaration)
 
         # Now we run all our instructions on the class declaration
         for instruction in self.instructions:
-            applied |= instruction.run(fully_qualified_name, class_decl)
+            cached += instruction.run(fully_qualified_name, class_decl)
 
-        return applied
+        return cached
 
 
 def cache_file(input_filename, instruction_file, output_filename,
@@ -342,11 +344,11 @@ def cache_file(input_filename, instruction_file, output_filename,
     if tree.package_declaration is not None:
         package = tree.package_declaration.name.value + "."
 
-    applied = False
+    cached = []
     for type_decl in tree.type_declarations:
         if isinstance(type_decl, ClassDeclaration):
             name = package + type_decl.name.value
-            applied |= instruction_file.rewrite_class_decl(name, type_decl)
+            cached += instruction_file.rewrite_class_decl(name, type_decl)
 
     if tree_callback is not None:
         tree_callback(tree, input_filename, output_filename)
@@ -355,7 +357,7 @@ def cache_file(input_filename, instruction_file, output_filename,
     with open(output_filename, "w") as f:
         f.write(tree.serialize())
 
-    return applied
+    return cached
 
 
 def main(input_filename, instruction_file_filename, output_filename,
@@ -366,6 +368,8 @@ def main(input_filename, instruction_file_filename, output_filename,
     # Load instruction_file
     with open(instruction_file_filename) as f:
         instruction_file = InstructionFile(f.read())
+
+    cached = []
 
     if os.path.isfile(input_filename):
         cache_file(input_filename, instruction_file, output_filename)
@@ -384,14 +388,18 @@ def main(input_filename, instruction_file_filename, output_filename,
                 in_path = os.path.join(root, file_)
 
                 try:
-                    cached = cache_file(in_path, instruction_file,
-                                        out_path, tree_callback)
+                    this_file_cached = cache_file(in_path, instruction_file,
+                                                  out_path, tree_callback)
                 except:
                     print("Choked on {}. Raising.".format(in_path))
                     raise
 
-                print("[{}] {} -> {}".format("CACHED" if cached else "      ",
-                                             in_path, out_path))
+                cached_str = "CACHED" if this_file_cached != [] else "      "
+                print("[{}] {} -> {}".format(cached_str, in_path, out_path))
+
+                cached += this_file_cached
+
+    return cached
 
 
 if __name__ == "__main__":
