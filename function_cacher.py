@@ -248,7 +248,7 @@ class CacheArrayNoNullsInstruction(Instruction):
                     array_decl_name,
                     ArrayCreation(
                         get_decl.return_type,
-                        [MethodInvocation(count_decl.name)]
+                        [Cast("int", MethodInvocation(count_decl.name))]
                     )
                 ))
             ),
