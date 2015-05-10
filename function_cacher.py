@@ -40,6 +40,10 @@ import re
 
 INTEGER_TYPES = ["int", "long", "short"]
 
+IS_WINDOWS = os.name == 'nt'
+TERM_GREEN = '' if IS_WINDOWS else '\x1b[32m'
+TERM_NORMAL = '' if IS_WINDOWS else '\x1b[0m'
+
 
 def find_function_declaration(name, class_decl):
     for i, decl in function_declarations(name, class_decl):
@@ -379,6 +383,8 @@ def main(input_filename, instruction_file_filename, output_filename,
                              "directory")
         if not os.path.exists(output_filename):
             os.mkdir(output_filename)
+            
+        all_files = []
         for root, folders, files in os.walk(input_filename):
             rel_path = os.path.relpath(root, input_filename)
             for file_ in files:
@@ -386,18 +392,26 @@ def main(input_filename, instruction_file_filename, output_filename,
                 out_path = os.path.join(output_filename, file_loc)
                 out_path = os.path.abspath(out_path)
                 in_path = os.path.join(root, file_)
+                
+                all_files.append((in_path, out_path))
+        all_files.sort()
+        
+        for in_path, out_path in all_files:
+            try:
+                this_file_cached = cache_file(in_path, instruction_file,
+                                              out_path, tree_callback)
+            except:
+                print("Choked on {}. Raising.".format(in_path))
+                raise
+            
+            if this_file_cached != []:
+                print("[$CACHED%] ${:<48} -> {}%".replace("$", TERM_GREEN)
+                                                   .replace("%", TERM_NORMAL)
+                                                   .format(in_path, out_path))
+            else:
+                print("[      ] {:<48} -> {}".format(in_path, out_path))
 
-                try:
-                    this_file_cached = cache_file(in_path, instruction_file,
-                                                  out_path, tree_callback)
-                except:
-                    print("Choked on {}. Raising.".format(in_path))
-                    raise
-
-                cached_str = "CACHED" if this_file_cached != [] else "      "
-                print("[{}] {} -> {}".format(cached_str, in_path, out_path))
-
-                cached += this_file_cached
+            cached += this_file_cached
 
     return cached
 
