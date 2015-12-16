@@ -310,6 +310,7 @@ class CacheArrayNoNullsInstruction(Instruction):
 
         # create count_decl again, it returns size of the array or if the array
         # is null it creates it with the size of count_decl_uncached
+        # TODO: There are thread safety issues with this code, see above.
         count_decl_cached_body = [
             IfThenElse(
                 Equality("==", array_decl_name, null),
