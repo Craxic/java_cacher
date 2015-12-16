@@ -26,18 +26,19 @@ import os
 import sys
 from plyj.model.classes import ClassDeclaration, FieldDeclaration
 from plyj.model.expression import Equality, FieldAccess, Assignment, \
-    ArrayCreation, MethodInvocation, ArrayAccess, Cast, Unary
+    ArrayCreation, MethodInvocation, ArrayAccess, Cast, Unary, InstanceCreation
 from plyj.model.literal import Literal
 from plyj.model.method import MethodDeclaration
 from plyj.model.modifier import BasicModifier
 from plyj.model.name import Name
-from plyj.model.statement import IfThenElse, Return, Block, ExpressionStatement
+from plyj.model.statement import IfThenElse, Return, Block, ExpressionStatement, Synchronized
 from plyj.model.type import Type
 from plyj.model.variable import VariableDeclarator, Variable
 from plyj.parser import Parser
 import abc
 import re
 
+SWIG_CACHE_MONITOR = "__swig__cache__monitor__"
 INTEGER_TYPES = ["int", "long", "short"]
 
 IS_WINDOWS = os.name == 'nt'
@@ -55,10 +56,10 @@ def function_declarations(name, class_decl):
     return_list = []
     if name == "!public_non_primitive_returns!":
         for i, decl in enumerate(class_decl.body):
-            if (isinstance(decl, MethodDeclaration)
-               and not Type.is_primitive(decl.return_type.name.value)
-               and len(decl.parameters) == 0
-               and "public" in [x.value for x in decl.modifiers]):
+            if (isinstance(decl, MethodDeclaration) and
+               not Type.is_primitive(decl.return_type.name.value) and
+               len(decl.parameters) == 0 and
+               "public" in [x.value for x in decl.modifiers]):
                 return_list.append((i, decl))
     else:
         for i, decl in enumerate(class_decl.body):
@@ -88,6 +89,40 @@ def name_matches(expression, real_name):
         return re.match(expression[1:], real_name) is not None
     else:
         return expression == real_name
+
+
+def ensure_static_monitor(insert_index, class_decl):
+    """
+    Ensure that the given class declaration has a field declaration that looks like:
+
+        private static final Object __swig__cache__monitor__ = new Object();
+
+    :param class_decl: Class declaration to add monitor to.
+    :param insert_index: Denotes the index to add the declaration if it does
+                         not exist.
+    """
+    for x in class_decl.body:
+        if isinstance(x, FieldDeclaration) and \
+           x.type.name.value == "Object" and \
+           len(x.variable_declarators) == 1 and \
+           x.variable_declarators[0].variable.name.value == SWIG_CACHE_MONITOR:
+                return
+
+    cached_decl = FieldDeclaration(
+        Type("Object"),
+        VariableDeclarator(Variable(Name(SWIG_CACHE_MONITOR)),
+                           InstanceCreation("Object")),
+        modifiers=["private", "static", "final"])
+
+    class_decl.body.insert(insert_index, cached_decl)
+
+
+def synchronized_check_query(query, x):
+    return IfThenElse(
+               query,
+               Synchronized(Name(SWIG_CACHE_MONITOR),
+                            Block([IfThenElse(query, x)]))
+           )
 
 
 class CacheInstruction(Instruction):
@@ -126,13 +161,13 @@ class CacheInstruction(Instruction):
                 "boolean",
                 VariableDeclarator(Variable(is_cached_name), 
                                    Literal("false")),
-                modifiers=["private"] + static_modifiers)
+                modifiers=["private", "volatile"] + static_modifiers)
 
             cached_name = func_decl.name.value + "Cached"
             cached_decl = FieldDeclaration(
                 func_decl.return_type,
                 VariableDeclarator(Variable(cached_name)),
-                modifiers=["private"] + static_modifiers)
+                modifiers=["private", "volatile"] + static_modifiers)
 
             class_decl.body.insert(func_index, cached_decl)
             class_decl.body.insert(func_index, is_cached_decl)
@@ -142,28 +177,59 @@ class CacheInstruction(Instruction):
             BasicModifier.set_visibility(func_decl.modifiers, "private")
 
             # create func_decl again, this time wrapped in a cache.
-            func_decl_cached_body = [
-                IfThenElse(
-                    Unary("!", Name(is_cached_name)),
-                    Block([
-                        ExpressionStatement(Assignment(
-                            "=",
-                            Name(is_cached_name),
-                            Literal("true")
-                        )),
-                        ExpressionStatement(Assignment(
-                            "=",
-                            Name(cached_name),
-                            MethodInvocation(func_decl.name)
-                        ))
-                    ])
-                ),
-                Return(Name(cached_name))
-            ]
+            #
+            # For non-static methods: Objects are far less likely to be used in
+            # a multi-threaded context than a function explicitly marked as
+            # static. So, I believe that the benefits of including a
+            # synchronized block exceed the losses.
+            #
+            # Regardless of whether or not we use a synchronized block, the
+            # code will still work in a multi-threaded environment, we just
+            # might miss a result of the function call.
+            #
+            #     if (!<<is_cached_name>>) {
+            #         <<cached_name>> = <<func_decl.name>>()
+            #         <<is_cached_name>> = true;
+            #     }
+            #
+            # For static methods:
+            #
+            #     if (!<<is_cached_name>>) {
+            #         synchronized (this) {
+            #             << Non static code here >>
+            #         }
+            #     }
+            #
+            check_cache = Unary("!", Name(is_cached_name))
+            on_cache = Block([
+                ExpressionStatement(Assignment(
+                    "=",
+                    Name(cached_name),
+                    MethodInvocation(func_decl.name)
+                )),
+                ExpressionStatement(Assignment(
+                    "=",
+                    Name(is_cached_name),
+                    Literal("true")
+                ))
+            ])
+            return_cache = Return(Name(cached_name))
+
+            if len(static_modifiers) > 0:
+                conditional_cache = synchronized_check_query(check_cache,
+                                                             on_cache)
+                ensure_static_monitor(func_index, class_decl)
+            else:
+                conditional_cache = IfThenElse(check_cache, on_cache)
+
+            cached_body = [conditional_cache, return_cache]
+
             func_decl_cached = MethodDeclaration(
                 func_decl_name, ["public"] + static_modifiers,
-                return_type=func_decl.return_type, body=func_decl_cached_body)
+                return_type=func_decl.return_type, body=cached_body)
+
             class_decl.body.insert(func_index, func_decl_cached)
+
         return cached
 
 
